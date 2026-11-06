@@ -33,6 +33,8 @@ export default function KOTConfirmationNotifier({ order, onStartCooking, onCance
           bc.postMessage({ type: "KOT_UPDATE", ticketId: order.id, newStatus: "cancelled" });
           bc.close();
         } catch (e) {}
+        localStorage.setItem("last_cancelled_order_id", String(order.id));
+        localStorage.setItem("last_pos_order_ts", String(Date.now()));
       }
     } catch (err) {
       alert("Failed to cancel order: " + (err.message || "Error"));

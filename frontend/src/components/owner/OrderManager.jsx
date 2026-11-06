@@ -104,7 +104,16 @@ export default function OrderManager({ onSelectOrder, refreshKey = 0 }) {
       bc.onmessage = (event) => {
         if (event.data?.type === "NEW_ORDER" && event.data?.order) {
           const ord = event.data.order;
-          setConfirmedOrderAlert(ord);
+          if (ord.status !== "cancelled" && ord.kitchenStatus !== "cancelled") {
+            setConfirmedOrderAlert(ord);
+          }
+          fetchOrdersAndTables();
+        } else if (
+          event.data?.type === "KOT_UPDATE" ||
+          event.data?.type === "ORDER_CANCELLED" ||
+          event.data?.type === "ORDER_UPDATE" ||
+          event.data?.type === "NEW_ORDER"
+        ) {
           fetchOrdersAndTables();
         }
       };
@@ -114,10 +123,12 @@ export default function OrderManager({ onSelectOrder, refreshKey = 0 }) {
       if (e.key === "last_pos_order_data" && e.newValue) {
         try {
           const parsed = JSON.parse(e.newValue);
-          if (parsed && parsed.id) setConfirmedOrderAlert(parsed);
+          if (parsed && parsed.id && parsed.status !== "cancelled" && parsed.kitchenStatus !== "cancelled") {
+            setConfirmedOrderAlert(parsed);
+          }
         } catch (err) {}
         fetchOrdersAndTables();
-      } else if (e.key === "last_pos_order_ts") {
+      } else if (e.key === "last_pos_order_ts" || e.key === "last_cancelled_order_id") {
         fetchOrdersAndTables();
       }
     };
@@ -167,9 +178,37 @@ export default function OrderManager({ onSelectOrder, refreshKey = 0 }) {
   const handleUpdateStatus = async (orderId, newStatus) => {
     try {
       await api.owner.updateOrderStatus(orderId, newStatus);
+      if (newStatus === "cancelled") {
+        await api.owner.updateKitchenStatus(orderId, "cancelled");
+        localStorage.setItem("last_cancelled_order_id", String(orderId));
+      }
+      try {
+        const bc = new BroadcastChannel("pos_orders");
+        bc.postMessage({ type: "KOT_UPDATE", ticketId: orderId, newStatus });
+        bc.close();
+      } catch (e) {}
+      localStorage.setItem("last_pos_order_ts", String(Date.now()));
       fetchOrdersAndTables();
     } catch (err) {
       alert(err.message || "Failed to update status");
+    }
+  };
+
+  const handleCancelOrder = async (orderId, orderNum) => {
+    if (!window.confirm(`Are you sure you want to cancel Order #${orderNum || orderId}? This will remove it from KOT immediately.`)) return;
+    try {
+      await api.owner.updateOrderStatus(orderId, "cancelled");
+      await api.owner.updateKitchenStatus(orderId, "cancelled");
+      try {
+        const bc = new BroadcastChannel("pos_orders");
+        bc.postMessage({ type: "KOT_UPDATE", ticketId: orderId, newStatus: "cancelled" });
+        bc.close();
+      } catch (e) {}
+      localStorage.setItem("last_cancelled_order_id", String(orderId));
+      localStorage.setItem("last_pos_order_ts", String(Date.now()));
+      fetchOrdersAndTables();
+    } catch (err) {
+      alert("Failed to cancel order: " + (err.message || "Error"));
     }
   };
 
@@ -421,7 +460,7 @@ export default function OrderManager({ onSelectOrder, refreshKey = 0 }) {
                         </div>
                       ) : (
                         <div className="space-y-1 max-h-44 overflow-y-auto">
-                          {data.orders.slice(0, 1).map((ord) => {
+                          {data.orders.map((ord) => {
                             const isKotCompleted = ord.kitchenStatus === "completed";
                             const rawName = ord.customerName || "";
                             const isTablePrefix = !rawName || rawName.toLowerCase().startsWith("table ");
@@ -432,7 +471,11 @@ export default function OrderManager({ onSelectOrder, refreshKey = 0 }) {
                                 key={ord.id}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleOpenTableMenu(table);
+                                  if (onSelectOrder) {
+                                    onSelectOrder(ord);
+                                  } else {
+                                    handleOpenTableMenu(table);
+                                  }
                                 }}
                                 className={`p-1.5 rounded-lg border text-[10px] space-y-1 cursor-pointer transition-all shadow-2xs group/ticket ${
                                   isKotCompleted ? "bg-emerald-50/70 border-emerald-300 hover:border-emerald-400" : "bg-white border-slate-200 hover:border-orange-300"
@@ -456,9 +499,24 @@ export default function OrderManager({ onSelectOrder, refreshKey = 0 }) {
                                 </div>
                                 <div className="flex items-center justify-between text-slate-500 text-[9.5px]">
                                   <span>{ord.items?.length || 0} items</span>
-                                  <span className="font-extrabold text-slate-800">
-                                    ₹{Number(ord.totalAmount || 0).toFixed(2)}
-                                  </span>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-extrabold text-slate-800">
+                                      ₹{Number(ord.totalAmount || 0).toFixed(2)}
+                                    </span>
+                                    {ord.status !== "cancelled" && ord.status !== "completed" && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleCancelOrder(ord.id, ord.orderNumber);
+                                        }}
+                                        className="text-[8px] font-bold text-rose-500 hover:text-rose-700 hover:underline px-0.5 cursor-pointer"
+                                        title="Cancel order and remove from KOT"
+                                      >
+                                        Cancel
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
                             );
@@ -518,27 +576,70 @@ export default function OrderManager({ onSelectOrder, refreshKey = 0 }) {
             return (
               <div
                 key={order.id}
-                onClick={() => setBillingModalOrder(order)}
+                onClick={() => (onSelectOrder ? onSelectOrder(order) : setBillingModalOrder(order))}
                 className="bg-white rounded-2xl p-5 border border-slate-200 hover:border-orange-400 shadow-xs hover:shadow-md space-y-3 cursor-pointer transition-all group"
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-800 group-hover:text-orange-600 transition-colors text-xs" title={displayName}>
                     {displayName}
                   </span>
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border capitalize ${statusColors[order.status]}`}>
-                  {order.status}
-                </span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border capitalize ${statusColors[order.status]}`}>
+                    {order.status}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>
+                    {order.tableNumber ? `Table ${order.tableNumber}` : "Takeaway"} • {order.items?.length || 0} items
+                  </span>
+                  <span className="font-bold text-emerald-600">
+                    ₹{Number(order.totalAmount || 0).toFixed(2)}
+                  </span>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    onClick={() => (onSelectOrder ? onSelectOrder(order) : setBillingModalOrder(order))}
+                    className="text-[11px] font-bold text-slate-600 hover:text-slate-900 cursor-pointer"
+                  >
+                    View Details
+                  </button>
+
+                  <div className="flex items-center gap-1.5">
+                    {order.status !== "cancelled" && order.status !== "completed" && order.paymentStatus !== "paid" && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCancelOrder(order.id, order.orderNumber);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-[10px] font-bold transition-colors cursor-pointer"
+                        title="Cancel this order and remove it from KOT"
+                      >
+                        Cancel
+                      </button>
+                    )}
+
+                    {order.paymentStatus !== "paid" && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setBillingModalOrder(order);
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer ${
+                          order.kitchenStatus === "completed"
+                            ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                            : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+                        }`}
+                      >
+                        {order.kitchenStatus === "completed" ? "Settle Bill" : "Bill Details"}
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span>
-                  {order.tableNumber ? `Table ${order.tableNumber}` : "Takeaway"} • {order.items?.length || 0} items
-                </span>
-                <span className="font-bold text-emerald-600">
-                  ₹{Number(order.totalAmount || 0).toFixed(2)}
-                </span>
-              </div>
-            </div>
-          );
+            );
           })}
         </div>
       )}

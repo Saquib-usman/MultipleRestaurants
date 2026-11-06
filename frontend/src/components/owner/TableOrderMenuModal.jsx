@@ -352,6 +352,32 @@ export default function TableOrderMenuModal({
     }
   };
 
+  const handleCancelExistingTicket = async (orderId, orderNum) => {
+    if (!window.confirm(`Are you sure you want to cancel Ticket #${orderNum || orderId}? This will remove it from KOT immediately.`)) {
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.owner.updateOrderStatus(orderId, "cancelled");
+      await api.owner.updateKitchenStatus(orderId, "cancelled");
+      try {
+        const bc = new BroadcastChannel("pos_orders");
+        bc.postMessage({ type: "KOT_UPDATE", ticketId: orderId, newStatus: "cancelled" });
+        bc.close();
+      } catch (e) {}
+      localStorage.setItem("last_cancelled_order_id", String(orderId));
+      localStorage.setItem("last_pos_order_ts", String(Date.now()));
+
+      setExistingOrders((prev) => prev.filter((o) => o.id !== orderId));
+      if (onOrderPlaced) onOrderPlaced();
+    } catch (err) {
+      setError(err.message || "Failed to cancel ticket");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -791,8 +817,19 @@ export default function TableOrderMenuModal({
                     {existingOrders.map((ord, idx) => (
                       <div key={ord.id || idx} className="bg-white rounded-xl p-2.5 border-l-4 border-rose-500 border border-slate-200 shadow-2xs space-y-2">
                         <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 border-b border-slate-100 pb-1">
-                          <span className="text-rose-600 font-black">#{idx + 1} Ticket #{ord.id}</span>
-                          <span>{ord.createdAt ? new Date(ord.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '05:21 PM'}</span>
+                          <span className="text-rose-600 font-black">#{idx + 1} Ticket #{ord.orderNumber || ord.id}</span>
+                          <div className="flex items-center gap-2">
+                            <span>{ord.createdAt ? new Date(ord.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '05:21 PM'}</span>
+                            <button
+                              type="button"
+                              disabled={submitting}
+                              onClick={() => handleCancelExistingTicket(ord.id, ord.orderNumber)}
+                              className="text-[9px] text-rose-500 hover:text-rose-700 hover:underline font-extrabold cursor-pointer"
+                              title="Cancel ticket & remove from KOT"
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         </div>
 
                         <div className="space-y-1.5">

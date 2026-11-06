@@ -142,6 +142,7 @@ export default function NewOrderNotifier({ orders, onOpenOrder, onPendingCountCh
         bc.close();
       } catch (err) {}
 
+      localStorage.setItem("last_cancelled_order_id", String(activeAlert.id));
       localStorage.setItem("last_pos_order_ts", Date.now().toString());
 
       setCancelled(true);

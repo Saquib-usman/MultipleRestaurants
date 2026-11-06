@@ -87,6 +87,7 @@ function MainApp() {
         setLiveOrders(orders);
         const activeKots = orders.filter(
           (order) =>
+            order.status !== "cancelled" &&
             order.kitchenStatus !== "completed" &&
             order.kitchenStatus !== "cancelled" &&
             isCreatedToday(order)
@@ -116,14 +117,18 @@ function MainApp() {
     try {
       bc = new BroadcastChannel("pos_orders");
       bc.onmessage = (event) => {
-        if (event.data?.type === "NEW_ORDER" || event.data?.type === "KOT_UPDATE") {
+        if (event.data?.type === "NEW_ORDER" || event.data?.type === "KOT_UPDATE" || event.data?.type === "ORDER_CANCELLED") {
           fetchLiveOrders();
         }
       };
     } catch (e) {}
 
     const handleStorage = (e) => {
-      if (e.key === "last_pos_order_ts" || e.key === "last_pos_order_data") {
+      if (
+        e.key === "last_pos_order_ts" ||
+        e.key === "last_pos_order_data" ||
+        e.key === "last_cancelled_order_id"
+      ) {
         fetchLiveOrders();
       }
     };
@@ -209,6 +214,8 @@ function MainApp() {
         onClose={() => setIsOrderModalOpen(false)}
         onStatusUpdated={(id, newStatus) => {
           setSelectedOrderForModal((prev) => (prev ? { ...prev, status: newStatus } : null));
+          fetchLiveOrders();
+          setOrdersRefreshKey((key) => key + 1);
         }}
         onOpenBilling={(order) => setBillingOrder(order)}
       />

@@ -20,7 +20,8 @@ import {
   RotateCcw,
   MessageSquare,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  X
 } from "lucide-react";
 
 export default function KOTManager() {
@@ -38,17 +39,21 @@ export default function KOTManager() {
       const queryParams = dateFilter === "today" ? { today: "true" } : {};
       const data = await api.owner.getOrders(queryParams);
       if (Array.isArray(data)) {
+        // Exclude cancelled orders completely from KOT display
+        const activeData = data.filter(
+          (order) => order.status !== "cancelled" && order.kitchenStatus !== "cancelled"
+        );
         const nextStates = new Map(
-          data.map((order) => [
+          activeData.map((order) => [
             order.id,
             `${order.kitchenStatus}_${(order.items || []).reduce((s, i) => s + Number(i.quantity || 0), 0)}_${order.updatedAt || order.createdAt}`,
           ])
         );
         if (isInitialLoadRef.current) {
           isInitialLoadRef.current = false;
-          markOrdersAsSeen(data);
+          markOrdersAsSeen(activeData);
         } else {
-          const newlyConfirmed = data.find((order) => {
+          const newlyConfirmed = activeData.find((order) => {
             const isNewId = !orderStateRef.current.has(order.id);
             const isConfirmedOrPending = order.kitchenStatus === "confirmed" || order.kitchenStatus === "pending";
             return isConfirmedOrPending && (isNewId || !hasBeenAlerted(order));
@@ -59,7 +64,7 @@ export default function KOTManager() {
           }
         }
         orderStateRef.current = nextStates;
-        setOrders(data);
+        setOrders(activeData);
       }
     } catch (err) {
       console.warn("KOT orders fetch error:", err);
@@ -83,20 +88,40 @@ export default function KOTManager() {
       bc.onmessage = (event) => {
         if (event.data?.type === "NEW_ORDER" && event.data?.order) {
           const newOrd = event.data.order;
-          setConfirmedOrderAlert(newOrd);
-          playOrderChime();
+          if (newOrd.status !== "cancelled" && newOrd.kitchenStatus !== "cancelled") {
+            setConfirmedOrderAlert(newOrd);
+            playOrderChime();
+          }
           fetchOrders();
-        } else if (event.data?.type === "NEW_ORDER" || event.data?.type === "KOT_UPDATE") {
+        } else if (
+          event.data?.type === "KOT_UPDATE" ||
+          event.data?.type === "ORDER_UPDATE" ||
+          event.data?.type === "ORDER_CANCELLED"
+        ) {
+          const targetId = event.data?.ticketId || event.data?.orderId;
+          const newStatus = event.data?.newStatus || event.data?.status;
+          if (targetId && (newStatus === "cancelled" || event.data?.type === "ORDER_CANCELLED")) {
+            // Immediate real-time removal from KOT tickets state
+            setOrders((prev) => prev.filter((o) => String(o.id) !== String(targetId)));
+            setConfirmedOrderAlert((prev) => (prev && String(prev.id) === String(targetId) ? null : prev));
+          }
+          fetchOrders();
+        } else if (event.data?.type === "NEW_ORDER") {
           fetchOrders();
         }
       };
     } catch (e) {}
 
     const handleStorage = (e) => {
-      if (e.key === "last_pos_order_data" && e.newValue) {
+      if (e.key === "last_cancelled_order_id" && e.newValue) {
+        const cancelledId = e.newValue;
+        setOrders((prev) => prev.filter((o) => String(o.id) !== String(cancelledId)));
+        setConfirmedOrderAlert((prev) => (prev && String(prev.id) === String(cancelledId) ? null : prev));
+        fetchOrders();
+      } else if (e.key === "last_pos_order_data" && e.newValue) {
         try {
           const parsed = JSON.parse(e.newValue);
-          if (parsed && parsed.id) {
+          if (parsed && parsed.id && parsed.status !== "cancelled" && parsed.kitchenStatus !== "cancelled") {
             setConfirmedOrderAlert(parsed);
             playOrderChime();
           }
@@ -117,7 +142,9 @@ export default function KOTManager() {
   }, [dateFilter]);
 
   const kotTickets = useMemo(() => {
-    return orders.map((o) => {
+    return orders
+      .filter((o) => o.status !== "cancelled" && o.kitchenStatus !== "cancelled")
+      .map((o) => {
       const shortId = o.orderNumber ? o.orderNumber.slice(-4) : o.id;
       const items = (o.items || []).map((item) => ({
         itemName: item.itemName,
@@ -155,6 +182,11 @@ export default function KOTManager() {
   const handleUpdateKOTStatus = async (ticketId, newStatus) => {
     try {
       await api.owner.updateKitchenStatus(ticketId, newStatus);
+      if (newStatus === "cancelled") {
+        setOrders((prev) => prev.filter((o) => o.id !== ticketId));
+        setConfirmedOrderAlert((prev) => (prev?.id === ticketId ? null : prev));
+        localStorage.setItem("last_cancelled_order_id", String(ticketId));
+      }
       try {
         const bc = new BroadcastChannel("pos_orders");
         bc.postMessage({ type: "KOT_UPDATE", ticketId, newStatus });
@@ -164,6 +196,28 @@ export default function KOTManager() {
       fetchOrders();
     } catch (err) {
       alert("Failed to update status: " + (err.message || "Error"));
+    }
+  };
+
+  const handleCancelKOTTicket = async (ticket) => {
+    if (!window.confirm(`Are you sure you want to cancel ${ticket.kotNumber}? This will remove it from KOT immediately.`)) {
+      return;
+    }
+    try {
+      await api.owner.updateOrderStatus(ticket.orderId, "cancelled");
+      await api.owner.updateKitchenStatus(ticket.orderId, "cancelled");
+      setOrders((prev) => prev.filter((o) => o.id !== ticket.orderId));
+      setConfirmedOrderAlert((prev) => (prev?.id === ticket.orderId ? null : prev));
+      try {
+        const bc = new BroadcastChannel("pos_orders");
+        bc.postMessage({ type: "KOT_UPDATE", ticketId: ticket.orderId, newStatus: "cancelled" });
+        bc.close();
+      } catch (e) {}
+      localStorage.setItem("last_cancelled_order_id", String(ticket.orderId));
+      localStorage.setItem("last_pos_order_ts", String(Date.now()));
+      fetchOrders();
+    } catch (err) {
+      alert("Failed to cancel ticket: " + (err.message || "Error"));
     }
   };
 
@@ -373,11 +427,19 @@ export default function KOTManager() {
                         )}
                       </div>
 
-                      <div className="text-right shrink-0">
+                      <div className="flex items-center gap-1.5 shrink-0">
                         <span className="text-[9px] font-bold text-slate-400 uppercase flex items-center gap-0.5 justify-end">
                           <Clock className="w-2.5 h-2.5 text-slate-400" />
                           <span>{getElapsedTime(ticket.createdAt)}</span>
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => handleCancelKOTTicket(ticket)}
+                          className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                          title="Cancel ticket & remove from KOT"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
 

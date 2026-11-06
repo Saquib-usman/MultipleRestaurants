@@ -462,6 +462,9 @@ async function updateStatus(restaurantId, id, status) {
 }
 
 async function updateKitchenStatus(restaurantId, id, status) {
+  if (status === "cancelled") {
+    return updateStatus(restaurantId, id, "cancelled");
+  }
   const [result] = await db.query(
     "UPDATE orders SET kitchen_status = ? WHERE id = ? AND restaurant_id = ?",
     [status, id, restaurantId]

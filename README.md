@@ -1,4 +1,4 @@
-# Restaurant Management & POS System (UP 65 POS)
+# Restaurant Management & POS System 
 
 A comprehensive, full-stack Restaurant Management, Table & Room POS System built with React, Vite, Node.js, Express, and Tailwind CSS.
 
